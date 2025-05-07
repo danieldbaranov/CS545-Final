@@ -1,3 +1,5 @@
+# Facial Verification using Synthetic Data
+
 This is a facial verification pipeline loosely following FRCSynV2.
 
 This repo has 2 sections:
