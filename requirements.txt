@@ -10,3 +10,5 @@ numpy
 
 pytorch_metric_learning
 
+kornia
+tqdm
