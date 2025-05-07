@@ -102,7 +102,7 @@ class EmbeddingNet(nn.Module):
         return F.normalize(x, p=2, dim=1)
 
 
-def train_epoch(model, loader, optimizer, scaler, device, miner, loss_func):
+def train_epoch(model, loader, optimizer, scaler, device, loss_func, miner):
     model.train()
     running_loss = 0.0
     for x, labels in tqdm(loader, desc="Training", leave=False):
@@ -111,8 +111,11 @@ def train_epoch(model, loader, optimizer, scaler, device, miner, loss_func):
         optimizer.zero_grad()
         with torch.amp.autocast('cuda'):
             embeddings = model(x)
-            hard_triplets = miner(embeddings, labels)
-            loss = loss_func(embeddings, labels, hard_triplets)
+            if miner != None:
+                hard_triplets = miner(embeddings, labels)
+                loss = loss_func(embeddings, labels, hard_triplets)
+            else:
+                loss = loss_func(embeddings, labels)
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
@@ -225,6 +228,7 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--freeze_epochs', type=int, default=0)
+    parser.add_argument('--loss', type=str, default='Triplet')
     args = parser.parse_args()
 
     torch.manual_seed(42)
@@ -234,15 +238,31 @@ if __name__ == '__main__':
     print("loading dataset")
 
     train_ds = FaceDataset(args.train_dir, augment=kornia_augs)
-    sampler = MPerClassSampler(train_ds.labels, m=args.m_per_class, batch_size=args.batch_size)
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=args.batch_size,
-        sampler=sampler,
-        num_workers=8,
-        pin_memory=True,
-        persistent_workers=True
-    )
+    #sampler = MPerClassSampler(train_ds.labels, m=args.m_per_class, batch_size=args.batch_size)
+
+    if args.loss == 'Triplet':
+        print("using Triplet Loss")
+        sampler = MPerClassSampler(train_ds.labels, m=args.m_per_class, batch_size=args.batch_size)
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=args.batch_size,
+            sampler=sampler, # for Triplet Loss
+            num_workers=8,
+            pin_memory=True,
+            persistent_workers=True
+        )
+    else:
+        print("using other loss of type: " + args.loss)
+        sampler = MPerClassSampler(train_ds.labels, m=1, batch_size=args.batch_size)
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=args.batch_size,
+            #sampler=sampler, # for Triplet Loss
+            shuffle=True, # for ArcFace Loss
+            num_workers=8,
+            pin_memory=True,
+            persistent_workers=True
+        )
 
     eval_ds = FaceDataset(args.eval_dir)
     eval_loader = DataLoader(
@@ -255,21 +275,56 @@ if __name__ == '__main__':
 
     model = EmbeddingNet().to(device)
 
-    miner = TripletMarginMiner(margin=0.2, type_of_triplets='semihard')
-    loss_func = losses.TripletMarginLoss(margin=0.2)
+    miner = None
+
+    num_classes = len(train_ds.class_to_idx)
+    embed_dim   = model.embed_dim  # 512 by default
+
+    if args.loss == 'Triplet':
+        miner = TripletMarginMiner(margin=0.2, type_of_triplets='semihard')
+        loss_func = losses.TripletMarginLoss(margin=0.2)
+    else:
+        loss_func = losses.ArcFaceLoss(
+            num_classes=num_classes,
+            embedding_size=embed_dim,
+            margin=0.5,      # common choice: 0.5 radians
+            scale=64.0       # or 30.0, depending on your preference
+        )
+
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
+    if args.loss == 'ArcFace':
+        optimizer = optim.AdamW(
+            list(model.parameters()) + list(loss_func.parameters()),
+            lr=args.lr,
+            weight_decay=args.weight_decay
+        )
+
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=25, eta_min=1e-6)
     scaler = torch.amp.GradScaler('cuda')
 
     os.makedirs('Epochs', exist_ok=True)
 
+    # Base eval
+    results = evaluate_fast(model, eval_loader, device)
+    print(
+        f" Val Acc: {results['val_acc']:.4f},"
+        f" Test Acc: {results['test_acc']:.4f},"
+        f" AUC: {results['test_auc']:.4f},"
+        f" Thr: {results['threshold']:.4f}"
+        f" Chunk: {results['chunk_size']:.4f}"
+        f" FPR: {results['FPR']:.4f}"
+        f" FNR: {results['FNR']:.4f}"
+        f" TO: {results['TO']:.4f}"
+    )
+
     # Training loop
     for epoch in range(1, args.epochs+1):
         print(f"Epoch {epoch}/{args.epochs}")
-        if epoch == 4:
-            miner = TripletMarginMiner(margin=0.2, type_of_triplets='hard')
+        if epoch == 4 and miner != None:
+            miner = TripletMarginMiner(margin=0.2, type_of_triplets='hard') # for Triplet Loss
 
-        train_loss = train_epoch(model, train_loader, optimizer, scaler, device, miner, loss_func)
+        train_loss = train_epoch(model, train_loader, optimizer, scaler, device, loss_func, miner)
         print(f"Train Loss: {train_loss:.4f}")
         scheduler.step()
 
@@ -280,12 +335,16 @@ if __name__ == '__main__':
                 f" Test Acc: {results['test_acc']:.4f},"
                 f" AUC: {results['test_auc']:.4f},"
                 f" Thr: {results['threshold']:.4f}"
+                f" Chunk: {results['chunk_size']:.4f}"
+                f" FPR: {results['FPR']:.4f}"
+                f" FNR: {results['FNR']:.4f}"
+                f" TO: {results['TO']:.4f}"
             )
-            torch.save(model.state_dict(), f'Epochs/temp_epoch_{epoch}.pt')
+            torch.save(model.state_dict(), f'Epochs/triplet_epoch_{epoch}.pt')
 
     final_res = evaluate_fast(model, eval_loader, device)
     print("Final Evaluation:")
     print(f" Test Acc: {final_res['test_acc']:.4f}")
     print(f" Test AUC: {final_res['test_auc']:.4f}")
 
-    torch.save(model.state_dict(), f'Epochs/model_epoch_{args.epochs}_final.pt')
+    torch.save(model.state_dict(), f'Epochs/triplet_epoch_{args.epochs}_final.pt')
