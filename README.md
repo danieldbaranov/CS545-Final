@@ -7,8 +7,11 @@ This repo has 2 sections:
 - Training/Evaluation
 
 **Preprocessing -> preprocess.py**
+
 It takes in any dataset that's in the form of an ImageFolder, and turns it into an ImageFolder of pytorch tensors. The preprocessing that is done is facial alignment done with MTCNN, and normalization to the ImageNet mean and std. Preprocessing as tensors allows for easier access when training/evaluating.
+
 **Training/Evaluation -> train.py**
+
 It takes in the preprocessed ImageFolder for the training dataset and evaluation dataset, and then which loss function you want (Triplet loss by default). After every 5 Epochs, evaluation is done with the validation dataset, printing stats.
 
 **STEPS TO RUN:**
