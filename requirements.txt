@@ -1,4 +1,4 @@
---index-url https://download.pytorch.org/whl/cu126
+--index-url https://download.pytorch.org/whl/cu118
 --extra-index-url https://pypi.org/simple
 
 torch
@@ -12,3 +12,6 @@ pytorch_metric_learning
 
 kornia
 tqdm
+
+onnxruntime-gpu
+insightface
